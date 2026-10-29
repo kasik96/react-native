@@ -79,15 +79,27 @@ class SimpleThreadSafeCache {
 
   auto getMapIterator(const KeyT &key, CacheGeneratorFunction<ValueT> auto generator) const
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (auto it = map_.find(key); it != map_.end()) {
+        // Move accessed item to front of list
+        list_.splice(list_.begin(), list_, it->second);
+        return it;
+      }
+    }
 
+    // The generator runs without the lock: it may block on another thread
+    // that needs this cache. On iOS, text measurement creates an
+    // NSTextStorage whose editing notification can wait for the main queue,
+    // while the main thread waits for this lock to measure text.
+    auto value = generator();
+
+    std::lock_guard<std::mutex> lock(mutex_);
     if (auto it = map_.find(key); it != map_.end()) {
-      // Move accessed item to front of list
+      // Another thread generated the same key meanwhile
       list_.splice(list_.begin(), list_, it->second);
       return it;
     }
-
-    auto value = generator();
     // Add new value to front of list and map
     list_.emplace_front(key, value);
     auto [it, _] = map_.insert_or_assign(key, list_.begin());

@@ -8,6 +8,10 @@
 #include <gtest/gtest.h>
 #include <react/utils/SimpleThreadSafeCache.h>
 
+#include <chrono>
+#include <future>
+#include <thread>
+
 namespace facebook::react {
 
 TEST(EvictingCacheMapTest, BasicInsertAndGet) {
@@ -35,6 +39,42 @@ TEST(EvictingCacheMapTest, Eviction) {
       ""); // key 1 should be evicted and default constructed value is returned
   EXPECT_EQ(cache.get(2), "two");
   EXPECT_EQ(cache.get(3), "three");
+}
+
+TEST(EvictingCacheMapTest, GeneratorDoesNotBlockOtherThreads) {
+  SimpleThreadSafeCache<int, std::string, 3> cache;
+  std::promise<void> otherThreadDone;
+  std::thread other;
+
+  // The generator waits for a second thread that reads the same cache, as an
+  // iOS text measurement waits for the main thread.
+  auto value = cache.get(1, [&]() {
+    other = std::thread([&]() {
+      cache.get(2, []() { return std::string("two"); });
+      otherThreadDone.set_value();
+    });
+    auto status =
+        otherThreadDone.get_future().wait_for(std::chrono::seconds(5));
+    return std::string(
+        status == std::future_status::ready ? "one" : "blocked");
+  });
+  other.join();
+
+  EXPECT_EQ(value, "one");
+  EXPECT_EQ(cache.get(2), "two");
+}
+
+TEST(EvictingCacheMapTest, ConcurrentMissKeepsFirstInsertedValue) {
+  SimpleThreadSafeCache<int, std::string, 3> cache;
+
+  auto value = cache.get(1, [&]() {
+    std::thread other([&]() { cache.get(1, []() { return std::string("first"); }); });
+    other.join();
+    return std::string("second");
+  });
+
+  EXPECT_EQ(value, "first");
+  EXPECT_EQ(cache.get(1), "first");
 }
 
 } // namespace facebook::react
